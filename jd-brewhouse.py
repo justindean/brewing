@@ -8,8 +8,8 @@ import RPi.GPIO as GPIO
 
 
 #setup up 1-wire probes in linux (**validate this is still needed**)--prob do this in some kind of init/main script not the logger
-#os.system('modprobe w1-gpio')
-#os.system('modprobe w1-therm')
+os.system('modprobe w1-gpio')
+os.system('modprobe w1-therm')
 
 FEED_ID = "192066180"
 API_KEY = "2pUA8p0bGmvdREAiK7hXIBp9SYpm8ZCDaS2wG0lBmc2uoaKl"
@@ -19,24 +19,24 @@ api = xively.XivelyAPIClient(API_KEY)
 #function to initialize GPIO pin(s) for outbound 3.3v use
 def Setup_GPIO():
     GPIO.setmode(GPIO.BOARD)
-    GPIO.setup(18, GPIO.OUT)
+    GPIO.setup(12, GPIO.OUT)
 
 #function to reset the GPIO pin(s) back to INPUT and turn them off. The gpio cleanup function is missing for some reason.
 def Reset_GPIO():
-    GPIO.output(18,0)
-    GPIO.setup(18, GPIO.IN)
+    GPIO.output(12,0)
+    GPIO.setup(12, GPIO.IN)
 
 def turn_heat_on():
-    GPIO.output(18,GPIO.HIGH)
+    GPIO.output(12,GPIO.HIGH)
     print "TURNING UP TH HEAT"
 
 def turn_heat_off():
-    GPIO.output(18,0)
+    GPIO.output(12,0)
     print "Turning the heat off!"
 
 #fuction to get temperature data from 1-wire file the popen way
 def temperature_data():
-    pipe = Popen(["cat","w1_slave_dummmy_file.txt"], stdout=PIPE)
+    pipe = Popen(["cat","/sys/bus/w1/devices/28-000005009b14/w1_slave"], stdout=PIPE)
     results = pipe.communicate()[0]
     print results
     result_list = results.split("=")
@@ -46,7 +46,7 @@ def temperature_data():
 
 #function to get temperature data from 1-wire file and convert to celcius
 def get_temp_data_file():
-    tempfile = open('w1_slave_dummmy_file.txt', 'r')
+    tempfile = open('/sys/bus/w1/devices/28-000005009b14/w1_slave', 'r')
     temprawdata = tempfile.read()
     tempfile.close()
     tempsplitdata = temprawdata.split("=")
@@ -81,8 +81,6 @@ interror=0
 pwr_cnt=1
 pwr_tot=0
 
-#heater_state="on"
-#turn_heat_on()
 target_temp = int(options.target * 1000)
 
 #function that updates xively feeds directly from reading file of temp probe
@@ -103,7 +101,7 @@ def update_graphs():
         print "HTTPError({0}): {1}]".format(e.errno, e.strerror)
     #time.sleep(10) #figure this out...cant have it sleep on logging part
 
-#ligher version of the xively updater function that you feed the current temp 
+#lighter version of the xively updater function that you feed the current temp 
 def update_graphs_lite(current_temp):
      feed = api.feeds.get(FEED_ID)
      datastream = get_datastream(feed)
@@ -122,7 +120,8 @@ def Ramp_Up():
     while (target_temp - current_temp > 6000):
         print "Ramping temperature up.  Current temp is %d" % current_temp
         update_graphs_lite(current_temp)
-        sleep(5)
+        turn_heat_on()
+        sleep(10)
         current_temp = int(get_temp_data_file())
         print "Current temp is now %d" % current_temp
     print "Ramp up Complete"    
@@ -135,28 +134,28 @@ def PID_Control_Loop():
     while True:
         current_temp = int(get_temp_data_file())
         update_graphs_lite(current_temp)
-        print "Current Temp is %d" % current_temp
+        print "Current Temp is %d and target temp is %d" % (current_temp,target_temp)
         error = target_temp - current_temp
         interror = interror + error
         power = B + ((P * error) + ((I * interror)/100))/100
         print "power is %d" % power
-        for x in range(1,30):
+        for x in range(1,10):
             print x
-            if (power > x):
+            if (power > x**2): #May need tuning, still overshoots by power of 30, holds steady after that though
                 if (heater_state=="off"):
                     heater_state = "on"
                     print "State = ON"
                     turn_heat_on()
                 else:
                     print "leave on the heat"
-
             else:
                 if (heater_state=="on"):
                     heater_state="off"
                     print "State is OFF"
                     turn_heat_off()
             sleep(1)        
-
+        if (power < 100):
+            sleep(10)
 
 def main():
     Setup_GPIO()
@@ -169,5 +168,3 @@ main()
 
 
 
-#temperature_data()    
-#get_temp_data_file()
