@@ -1,11 +1,12 @@
 import os
-from time import sleep
+import time
 from optparse import OptionParser
 from subprocess import Popen, PIPE, call
 import xively
 import datetime
 import RPi.GPIO as GPIO
-
+import json
+from time import sleep
 
 #setup up 1-wire probes in linux (**validate this is still needed**)--prob do this in some kind of init/main script not the logger
 os.system('modprobe w1-gpio')
@@ -15,6 +16,38 @@ FEED_ID = "192066180"
 API_KEY = "2pUA8p0bGmvdREAiK7hXIBp9SYpm8ZCDaS2wG0lBmc2uoaKl"
 
 api = xively.XivelyAPIClient(API_KEY)
+parser = OptionParser()
+parser.add_option("-r", "--recipe", type=str, default = 'recipe.json.rtb')
+#parser.add_option("-t", "--target", type=int, default = 55)
+parser.add_option("-p", "--prop", type=int, default = 6)
+parser.add_option("-i", "--integral", type=int, default = 2)
+parser.add_option("-b", "--bias", type=int, default = 22)
+(options, args) = parser.parse_args()
+P = options.prop
+I = options.integral
+B = options.bias
+recipefile = options.recipe
+
+#some vars for the control loop
+interror=0
+pwr_cnt=1
+pwr_tot=0
+
+#Parse recipe file and build global brew variables
+f = open(recipefile, 'r')
+data = f.read()
+recipedata = json.loads(data)
+MASH_TEMP = float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['STEP_TEMP'])
+MASH_TIME = float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['STEP_TIME'])
+STRIKE_TEMP = (float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['INFUSE_TEMP'].strip(' F')) - 32) * 5 / 9
+STRIKE_VOLUME = float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['INFUSE_AMOUNT'])
+BOIL_VOLUME = float(recipedata["RECIPES"]["RECIPE"]['EQUIPMENT']['BOIL_SIZE'])
+BATCH_VOLUME = float(recipedata["RECIPES"]["RECIPE"]['EQUIPMENT']['BATCH_SIZE'])
+BOIL_TIME = float(recipedata["RECIPES"]["RECIPE"]['EQUIPMENT']['BOIL_TIME'])
+WHIRLFLOCK_TIME = BOIL_TIME - 10
+
+current_step_target = STRIKE_TEMP #change this for mash, mashout, boil
+target_temp = int(current_step_target * 1000)
 
 #function to initialize GPIO pin(s) for outbound 3.3v use
 def Setup_GPIO():
@@ -66,22 +99,6 @@ def get_datastream(feed):
         datastream = feed.datastreams.create("TemperatureSensor", tags="temperature")
         return datastream
 
-parser = OptionParser()
-parser.add_option("-t", "--target", type=int, default = 55)
-parser.add_option("-p", "--prop", type=int, default = 6)
-parser.add_option("-i", "--integral", type=int, default = 2)
-parser.add_option("-b", "--bias", type=int, default = 22)
-(options, args) = parser.parse_args()
-print "The Target Temp is %d" % (options.target)
-P = options.prop
-I = options.integral
-B = options.bias
-#some vars for the control loop
-interror=0
-pwr_cnt=1
-pwr_tot=0
-
-target_temp = int(options.target * 1000)
 
 #function that updates xively feeds directly from reading file of temp probe
 def update_graphs():
@@ -126,12 +143,14 @@ def Ramp_Up():
         print "Current temp is now %d" % current_temp
     print "Ramp up Complete"    
 
-def PID_Control_Loop():
+def PID_Control_Loop(target_temp, current_step_time):
     interror = 0
     heater_state = "off"
     print "Now entering PID Control Loop"   
     print "interror = %d" % interror
-    while True:
+    stop_timer = time.time()+(current_step_time*60)
+    print target_temp, current_step_time
+    while time.time() < stop_timer:
         current_temp = int(get_temp_data_file())
         update_graphs_lite(current_temp)
         print "Current Temp is %d and target temp is %d" % (current_temp,target_temp)
@@ -157,14 +176,14 @@ def PID_Control_Loop():
         if (power < 100):
             sleep(10)
 
+    	
 def main():
     Setup_GPIO()
     #update_graphs()
-    Ramp_Up()
-    PID_Control_Loop()
+    #Ramp_Up()
+    print "Starting the Strike Temp PID Loop to %d C" % STRIKE_TEMP
+    PID_Control_Loop(STRIKE_TEMP, 60)
 
 main()        
-
-
 
 
