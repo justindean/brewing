@@ -7,6 +7,7 @@ import datetime
 import RPi.GPIO as GPIO
 import json
 from time import sleep
+import smtplib
 
 #setup up 1-wire probes in linux (**validate this is still needed**)--prob do this in some kind of init/main script not the logger
 os.system('modprobe w1-gpio')
@@ -22,6 +23,11 @@ parser.add_option("-r", "--recipe", type=str, default = 'recipe.json.rtb')
 parser.add_option("-p", "--prop", type=int, default = 6)
 parser.add_option("-i", "--integral", type=int, default = 2)
 parser.add_option("-b", "--bias", type=int, default = 22)
+parser.add_option("-m", "--manual", type=str, default = 'NO')
+parser.add_option("--mash_temp", type=int, default = 67)
+parser.add_option("--mash_time", type=int, default = 60)
+parser.add_option("--boil_time", type=int, default = 60)
+parser.add_option("--strike_temp", type=int, default = 70)
 (options, args) = parser.parse_args()
 P = options.prop
 I = options.integral
@@ -37,17 +43,26 @@ pwr_tot=0
 f = open(recipefile, 'r')
 data = f.read()
 recipedata = json.loads(data)
-MASH_TEMP = float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['STEP_TEMP'])
+MASH_TEMP = float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['STEP_TEMP']) * 1000
 MASH_TIME = float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['STEP_TIME'])
-STRIKE_TEMP = (float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['INFUSE_TEMP'].strip(' F')) - 32) * 5 / 9
+STRIKE_TEMP = (((float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['INFUSE_TEMP'].strip(' F')) - 32) * 5) / 9) * 1000
 STRIKE_VOLUME = float(recipedata["RECIPES"]["RECIPE"]['MASH']['MASH_STEPS']['MASH_STEP']['INFUSE_AMOUNT'])
 BOIL_VOLUME = float(recipedata["RECIPES"]["RECIPE"]['EQUIPMENT']['BOIL_SIZE'])
 BATCH_VOLUME = float(recipedata["RECIPES"]["RECIPE"]['EQUIPMENT']['BATCH_SIZE'])
 BOIL_TIME = float(recipedata["RECIPES"]["RECIPE"]['EQUIPMENT']['BOIL_TIME'])
 WHIRLFLOCK_TIME = BOIL_TIME - 10
-
+MASH_OUT_TEMP = (((168 - 32)*5) / 9) * 1000
+BOIL_TEMP = (((212 - 32)*5) / 9) * 1000
 current_step_target = STRIKE_TEMP #change this for mash, mashout, boil
 target_temp = int(current_step_target * 1000)
+
+if (options.manual=='YES'):
+    STRIKE_TEMP = options.strike_temp * 1000
+    MASH_TEMP = options.mash_temp * 1000
+    MASH_TIME = options.mash_time
+    BOIL_TIME = options.boil_time
+
+print MASH_TEMP, STRIKE_TEMP, MASH_OUT_TEMP, BOIL_TEMP
 
 #function to initialize GPIO pin(s) for outbound 3.3v use
 def Setup_GPIO():
@@ -132,10 +147,19 @@ def update_graphs_lite(current_temp):
      except requests.HTTPError as e:
          print "HTTPError({0}): {1}]".format(e.errno, e.strerror)
 
-def Ramp_Up():
+def Email_Status(MSG):
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login('@gmail.com', 'xxxxxx')
+        server.sendmail('JD-BREWHOUSE', 'xxxxxxxx@vtext.com', MSG)
+    except:
+        print "Email Status Failed"
+
+def Ramp_Up(target_temp):
     current_temp = int(get_temp_data_file())
     while (target_temp - current_temp > 6000):
-        print "Ramping temperature up.  Current temp is %d" % current_temp
+        print "Ramping temperature up.  Current temp is %d and ramping to target of %d" % (current_temp/1000, target_temp/1000)
         update_graphs_lite(current_temp)
         turn_heat_on()
         sleep(10)
@@ -143,17 +167,34 @@ def Ramp_Up():
         print "Current temp is now %d" % current_temp
     print "Ramp up Complete"    
 
+def Boil_Control(target_temp, current_step_time):
+    current_temp = int(get_temp_data_file())
+    stop_timer = time.time()+(current_step_time*60)
+    while time.time() < stop_timer:
+        print "BOILING - Current temp is %d, target temp is %d and time left on boil is %d seconds" % (current_temp/1000, target_temp/1000, (stop_timer - time.time()))
+        update_graphs_lite(current_temp)
+        turn_heat_on()
+        sleep(10)
+        current_temp = int(get_temp_data_file())
+        print "Current temp is now %d" % current_temp
+    print "Boil Complete"    
+
+
 def PID_Control_Loop(target_temp, current_step_time):
     interror = 0
     heater_state = "off"
-    print "Now entering PID Control Loop"   
-    print "interror = %d" % interror
+    print "Now entering PID Control Loop Function"   
+    STEP_BREAKOUT = False
+    if (current_step_time==0):
+	    STEP_BREAKOUT = True
+	    current_step_time = 180
     stop_timer = time.time()+(current_step_time*60)
     print target_temp, current_step_time
     while time.time() < stop_timer:
         current_temp = int(get_temp_data_file())
         update_graphs_lite(current_temp)
-        print "Current Temp is %d and target temp is %d" % (current_temp,target_temp)
+	print "You are in PID timer-while loop: Current Temp is %d and target temp is %d and step time left is %d seconds" % (current_temp/1000, target_temp/1000, (stop_timer - time.time()))
+	print "stop timer is %d and time.time is %d" % (stop_timer, time.time())
         error = target_temp - current_temp
         interror = interror + error
         power = B + ((P * error) + ((I * interror)/100))/100
@@ -175,15 +216,90 @@ def PID_Control_Loop(target_temp, current_step_time):
             sleep(1)        
         if (power < 100):
             sleep(10)
+        if (power <= 0) and (STEP_BREAKOUT==True):
+            print "Target Temp has been hit; Breaking out of PID loop"
+	    break
 
-    	
 def main():
     Setup_GPIO()
     #update_graphs()
-    #Ramp_Up()
+    #Setup file based user inputs for holding temps in PID loop while waiting for brewer to do physical things such as put in the grain    
+    GRAIN_IN = 'HOLD'
+    MASH_OUT = 'HOLD'
+    GRAIN_OUT = 'HOLD'
+    FLAME_OUT = 'HOLD'
+    grainfile = open('grainfile.txt', 'w')
+    mashfile = open('mashfile.txt', 'w')
+    grainoutfile = open('grainoutfile.txt', 'w')
+    flameoutfile = open('flameoutfile.txt', 'w')
+    grainfile.write(GRAIN_IN)
+    mashfile.write(MASH_OUT)
+    grainoutfile.write(GRAIN_OUT)
+    flameoutfile.write(FLAME_OUT)
+    grainfile.close()
+    mashfile.close()
+    grainoutfile.close()
+    flameoutfile.close()
+    MSG = "Starting Strike Temp Ramp"
+    Email_Status(MSG)
+    Ramp_Up(STRIKE_TEMP)
     print "Starting the Strike Temp PID Loop to %d C" % STRIKE_TEMP
-    PID_Control_Loop(STRIKE_TEMP, 60)
+    #Starting Strike Water
+    PID_Control_Loop(STRIKE_TEMP, 0)
+    while (GRAIN_IN=='HOLD'):
+        PID_Control_Loop(STRIKE_TEMP, 1)
+        print "waiting for you to update grainfile step"
+	MSG = "Strike Temp Hit- Update grainfile" 
+	Email_Status(MSG)
+	print GRAIN_IN
+	grainfile = open('grainfile.txt', 'r')
+	GRAIN_IN = grainfile.read().strip('\n')
+	grainfile.close()
+	print GRAIN_IN
+    print "Moving from Strike step to Mash Step"
+    #Starting Mash
+    PID_Control_Loop(MASH_TEMP, MASH_TIME)
+    while (MASH_OUT=='HOLD'):
+        PID_Control_Loop(MASH_TEMP, 1)
+        print "Hanging in mashout hold mode - waiting for you to update mashfile step"
+        MSG = "Time to Start Mashout - Update mashfile"
+        Email_Status(MSG)
+	print MASH_OUT
+	mashfile = open('mashfile.txt', 'r')
+	MASH_OUT = mashfile.read().strip('\n')
+	mashfile.close()
+	print MASH_OUT
+    print "Starting MASHOUT RAMP-UP Step"	
+    #Starting Mashout
+    Ramp_Up(MASH_OUT_TEMP)
+    print "Starting MASHOUT PID LOOP"
+    PID_Control_Loop(MASH_OUT_TEMP, 0)
+    while (GRAIN_OUT=='HOLD'):
+        PID_Control_Loop(MASH_OUT_TEMP, 1)
+        print "Hanging in mashout hold mode - waiting for you to update grainoutfile step"
+        MSG = "MASHOUT Temp Hit: Pull Grain and Update grainoutfile" 
+        Email_Status(MSG)
+	print GRAIN_OUT
+	grainoutfile = open('grainoutfile.txt', 'r')
+	GRAIN_OUT = grainoutfile.read().strip('\n')
+	grainoutfile.close()
+	print GRAIN_OUT
+    print "Ramping Boil"
+    Ramp_Up(BOIL_TEMP + 3000)
+    print "Done ramping Boil starting PID_BOIL LOOP"
+    MSG = "Done ramping Boil - Get ready to boil!"
+    Email_Status(MSG)
+    while (FLAME_OUT=='HOLD'):
+        Boil_Control(BOIL_TEMP, 1)
+        print "Hanging in BOIL mode - waiting for you to update BOILfile step if you think its actually done and ready for flameout"
+        MSG = "Boil is Complete- Update flameoutfile"
+        Email_Status(MSG)
+	print FLAME_OUT
+	flameoutfile = open('flameoutfile.txt', 'r')
+	FLAME_OUT = flameoutfile.read().strip('\n')
+	flameoutfile.close()
+	print FLAME_OUT
+    turn_heat_off()
+    print "the HEAT IS OFF!!!"
 
-main()        
-
-
+main()
