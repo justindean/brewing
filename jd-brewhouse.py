@@ -8,6 +8,7 @@ import RPi.GPIO as GPIO
 import json
 from time import sleep
 import smtplib
+import redis
 
 #setup up 1-wire probes in linux (**validate this is still needed**)--prob do this in some kind of init/main script not the logger
 os.system('modprobe w1-gpio')
@@ -15,11 +16,12 @@ os.system('modprobe w1-therm')
 
 FEED_ID = "192066180"
 API_KEY = "2pUA8p0bGmvdREAiK7hXIBp9SYpm8ZCDaS2wG0lBmc2uoaKl"
-
 api = xively.XivelyAPIClient(API_KEY)
+r=redis.StrictRedis(host='pub-redis-12700.eu-west-1-1.2.ec2.garantiadata.com', port=12700, db=0, password='brewhouse')
+
 parser = OptionParser()
 parser.add_option("-r", "--recipe", type=str, default = 'recipe.json.rtb')
-#parser.add_option("-t", "--target", type=int, default = 55)
+parser.add_option("--resume", type=str, default = 'NO')
 parser.add_option("-p", "--prop", type=int, default = 6)
 parser.add_option("-i", "--integral", type=int, default = 2)
 parser.add_option("-b", "--bias", type=int, default = 22)
@@ -62,7 +64,6 @@ if (options.manual=='YES'):
     MASH_TIME = options.mash_time
     BOIL_TIME = options.boil_time
 
-print MASH_TEMP, STRIKE_TEMP, MASH_OUT_TEMP, BOIL_TEMP
 
 #function to initialize GPIO pin(s) for outbound 3.3v use
 def Setup_GPIO():
@@ -193,8 +194,8 @@ def PID_Control_Loop(target_temp, current_step_time):
     while time.time() < stop_timer:
         current_temp = int(get_temp_data_file())
         update_graphs_lite(current_temp)
-	print "You are in PID timer-while loop: Current Temp is %d and target temp is %d and step time left is %d seconds" % (current_temp/1000, target_temp/1000, (stop_timer - time.time()))
-	print "stop timer is %d and time.time is %d" % (stop_timer, time.time())
+        print "You are in PID timer-while loop: Current Temp is %d and target temp is %d and step time left is %d seconds" % (current_temp/1000, target_temp/1000, (stop_timer - time.time()))
+        print "stop timer is %d and time.time is %d" % (stop_timer, time.time())
         error = target_temp - current_temp
         interror = interror + error
         power = B + ((P * error) + ((I * interror)/100))/100
@@ -207,7 +208,7 @@ def PID_Control_Loop(target_temp, current_step_time):
                     print "State = ON"
                     turn_heat_on()
                 else:
-                    print "leave on the heat"
+                    print "Leaving the Heat ON"
             else:
                 if (heater_state=="on"):
                     heater_state="off"
@@ -220,86 +221,204 @@ def PID_Control_Loop(target_temp, current_step_time):
             print "Target Temp has been hit; Breaking out of PID loop"
 	    break
 
-def main():
-    Setup_GPIO()
-    #update_graphs()
-    #Setup file based user inputs for holding temps in PID loop while waiting for brewer to do physical things such as put in the grain    
-    GRAIN_IN = 'HOLD'
-    MASH_OUT = 'HOLD'
-    GRAIN_OUT = 'HOLD'
-    FLAME_OUT = 'HOLD'
-    grainfile = open('grainfile.txt', 'w')
-    mashfile = open('mashfile.txt', 'w')
-    grainoutfile = open('grainoutfile.txt', 'w')
-    flameoutfile = open('flameoutfile.txt', 'w')
-    grainfile.write(GRAIN_IN)
-    mashfile.write(MASH_OUT)
-    grainoutfile.write(GRAIN_OUT)
-    flameoutfile.write(FLAME_OUT)
-    grainfile.close()
-    mashfile.close()
-    grainoutfile.close()
-    flameoutfile.close()
-    MSG = "Starting Strike Temp Ramp"
-    Email_Status(MSG)
-    Ramp_Up(STRIKE_TEMP)
-    print "Starting the Strike Temp PID Loop to %d C" % STRIKE_TEMP
-    #Starting Strike Water
-    PID_Control_Loop(STRIKE_TEMP, 0)
-    while (GRAIN_IN=='HOLD'):
-        PID_Control_Loop(STRIKE_TEMP, 1)
-        print "waiting for you to update grainfile step"
-	MSG = "Strike Temp Hit- Update grainfile" 
-	Email_Status(MSG)
-	print GRAIN_IN
-	grainfile = open('grainfile.txt', 'r')
-	GRAIN_IN = grainfile.read().strip('\n')
-	grainfile.close()
-	print GRAIN_IN
-    print "Moving from Strike step to Mash Step"
-    #Starting Mash
-    PID_Control_Loop(MASH_TEMP, MASH_TIME)
-    while (MASH_OUT=='HOLD'):
-        PID_Control_Loop(MASH_TEMP, 1)
-        print "Hanging in mashout hold mode - waiting for you to update mashfile step"
-        MSG = "Time to Start Mashout - Update mashfile"
-        Email_Status(MSG)
-	print MASH_OUT
-	mashfile = open('mashfile.txt', 'r')
-	MASH_OUT = mashfile.read().strip('\n')
-	mashfile.close()
-	print MASH_OUT
-    print "Starting MASHOUT RAMP-UP Step"	
-    #Starting Mashout
-    Ramp_Up(MASH_OUT_TEMP)
-    print "Starting MASHOUT PID LOOP"
-    PID_Control_Loop(MASH_OUT_TEMP, 0)
-    while (GRAIN_OUT=='HOLD'):
-        PID_Control_Loop(MASH_OUT_TEMP, 1)
-        print "Hanging in mashout hold mode - waiting for you to update grainoutfile step"
-        MSG = "MASHOUT Temp Hit: Pull Grain and Update grainoutfile" 
-        Email_Status(MSG)
-	print GRAIN_OUT
-	grainoutfile = open('grainoutfile.txt', 'r')
-	GRAIN_OUT = grainoutfile.read().strip('\n')
-	grainoutfile.close()
-	print GRAIN_OUT
-    print "Ramping Boil"
-    Ramp_Up(BOIL_TEMP + 3000)
-    print "Done ramping Boil starting PID_BOIL LOOP"
-    MSG = "Done ramping Boil - Get ready to boil!"
-    Email_Status(MSG)
-    while (FLAME_OUT=='HOLD'):
-        Boil_Control(BOIL_TEMP, 1)
-        print "Hanging in BOIL mode - waiting for you to update BOILfile step if you think its actually done and ready for flameout"
-        MSG = "Boil is Complete- Update flameoutfile"
-        Email_Status(MSG)
-	print FLAME_OUT
-	flameoutfile = open('flameoutfile.txt', 'r')
-	FLAME_OUT = flameoutfile.read().strip('\n')
-	flameoutfile.close()
-	print FLAME_OUT
-    turn_heat_off()
-    print "the HEAT IS OFF!!!"
 
-main()
+def Get_State():
+    for step in sorted(state_order, key=lambda i: i[1]):
+        complete_status = r.get(step[0]+'_complete')
+        if (complete_status=='NO'):
+            r.set(step[0]+'_state', 'ON')
+            print step[0]
+            return step[0]
+            break
+    else:
+        return 'COMPLETE'
+
+
+# initialize handler states for brewing process
+state_handler = {
+    'strike_ramp':Ramp_Up,
+    'strike_step':PID_Control_Loop,
+    'strike_hold':PID_Control_Loop,
+    'mash_step':PID_Control_Loop,
+    'mash_hold':PID_Control_Loop,
+    'mashout_ramp':Ramp_Up,
+    'mashout_hold':PID_Control_Loop,
+    'boil_ramp':Ramp_Up,
+    'boil_step':PID_Control_Loop,
+    'boil_hold':PID_Control_Loop
+    }
+
+state_order = [
+    ('strike_ramp',1),
+    ('strike_step',2),
+    ('strike_hold',3),
+    ('mash_step',4),
+    ('mash_hold',5),
+    ('mashout_ramp',6),
+    ('mashout_hold',7),
+    ('boil_ramp',8),
+    ('boil_step',9),
+    ('boil_hold',10)
+    ]
+
+
+def Setup_Redis_States():
+    for state in state_handler:
+        try:
+            r.set(state+'_timestamp', '')
+            r.set(state+'_complete', 'NO')
+            r.set(state+'_state', 'OFF')
+        except:
+            print "Error Setting up State_Handlers in Redis"
+
+
+def newmain():
+    if (options.resume=='NO'):
+        Setup_Redis_States()	
+    Setup_GPIO()
+    BOIL_TEMP = 20000
+    BOIL_TIME = 1
+    MASH_OUT_TEMP = 20000
+    while True:
+        current_state = Get_State()
+        print "current state = %s" % current_state
+        if (current_state=="strike_ramp"):
+            r.set(current_state+'_timestamp', time.time())
+            state_handler[current_state](STRIKE_TEMP)
+            r.set(current_state+'_complete', 'YES')
+        if (current_state=="strike_step"):
+            r.set(current_state+'_timestamp', time.time())
+            state_handler[current_state](STRIKE_TEMP, 0)
+            r.set(current_state+'_complete', 'YES')
+        if (current_state=="strike_hold"):
+            r.set(current_state+'_timestamp', time.time())
+            MSG = "Strike Temp Hit- Add Grains"
+            Email_Status(MSG)
+            state_handler[current_state](STRIKE_TEMP, 1)
+            #r.set(current_state+'_complete', 'YES')
+        if (current_state=="mash_step"):
+            if (options.resume=='YES'):
+                PREV_TIME_SPENT = float(time.time()) - float(r.get(current_state+'_timestamp'))
+                print "Previous Time Spent: %d" % PREV_TIME_SPENT
+                NEW_MASH_TIME = MASH_TIME - (PREV_TIME_SPENT/60)
+                print 'mash time resumed', NEW_MASH_TIME
+                state_handler[current_state](MASH_TEMP, NEW_MASH_TIME)
+                RESUME = 'NO'
+            else:
+                r.set(current_state+'_timestamp', time.time())
+                state_handler[current_state](MASH_TEMP, MASH_TIME)
+            r.set(current_state+'_complete', 'YES')
+        if (current_state=="mash_hold"):
+            MSG = "MASH Complete - Ready for Mashout?"
+            Email_Status(MSG)
+            state_handler[current_state](MASH_TEMP, 1)
+        if (current_state=="mashout_ramp"):
+            state_handler[current_state](MASH_OUT_TEMP)
+            r.set(current_state+'_complete', 'YES')
+        if (current_state=="mashout_hold"):
+            MSG = "MASHOUT Complete - Remove the Grains"
+            Email_Status(MSG)
+            state_handler[current_state](MASH_OUT_TEMP, 1)
+        if (current_state=="boil_ramp"):
+            state_handler[current_state](BOIL_TEMP+3000)
+            r.set(current_state+'_complete', 'YES')
+        if (current_state=="boil_step"):
+            if (options.resume=='YES') and (r.get(current_state+'_timestamp') != ''):
+                PREV_TIME_SPENT = float(time.time()) - float(r.get(current_state+'_timestamp'))
+                print "Previous Time Spent: %d" % PREV_TIME_SPENT
+                NEW_BOIL_TIME = BOIL_TIME - (PREV_TIME_SPENT/60)
+                print 'Boil time resumed', NEW_BOIL_TIME
+                state_handler[current_state](BOIL_TEMP, NEW_BOIL_TIME)
+                RESUME = 'NO'
+            else:
+                r.set(current_state+'_timestamp', time.time())
+                state_handler[current_state](BOIL_TEMP, BOIL_TIME)
+            r.set(current_state+'_complete', 'YES')
+        if (current_state=="boil_hold"):
+            MSG = "BOIL Complete - Ready for Flameout?"
+            Email_Status(MSG)
+            state_handler[current_state](BOIL_TEMP, 1)
+
+newmain()
+# File based approach prior to using Key Value (Redis) and keeping Brew States
+# Possible variation of this method for non-internet connected brew day
+
+#def OLDmain():
+#    Setup_GPIO()
+#    #update_graphs()
+#    MASH_OUT = 'HOLD'
+#    GRAIN_OUT = 'HOLD'
+#    FLAME_OUT = 'HOLD'
+#    grainfile = open('grainfile.txt', 'w')
+#    mashfile = open('mashfile.txt', 'w')
+#    grainoutfile = open('grainoutfile.txt', 'w')
+#    flameoutfile = open('flameoutfile.txt', 'w')
+#    grainfile.write(GRAIN_IN)
+#    mashfile.write(MASH_OUT)
+#    grainoutfile.write(GRAIN_OUT)
+#    flameoutfile.write(FLAME_OUT)
+#    grainfile.close()
+#    mashfile.close()
+#    grainoutfile.close()
+#    flameoutfile.close()
+#    MSG = "Starting Strike Temp Ramp"
+#    Email_Status(MSG)
+#    Ramp_Up(STRIKE_TEMP)
+#    print "Starting the Strike Temp PID Loop to %d C" % STRIKE_TEMP
+#    #Starting Strike Water
+#    PID_Control_Loop(STRIKE_TEMP, 0)
+#    while (GRAIN_IN=='HOLD'):
+#        PID_Control_Loop(STRIKE_TEMP, 1)
+#        print "waiting for you to update grainfile step"
+#	MSG = "Strike Temp Hit- Update grainfile" 
+#	Email_Status(MSG)
+#	print GRAIN_IN
+#	grainfile = open('grainfile.txt', 'r')
+#	GRAIN_IN = grainfile.read().strip('\n')
+#	grainfile.close()
+#	print GRAIN_IN
+#   print "Moving from Strike step to Mash Step"
+#    #Starting Mash
+#    PID_Control_Loop(MASH_TEMP, MASH_TIME)
+#    while (MASH_OUT=='HOLD'):
+#        PID_Control_Loop(MASH_TEMP, 1)
+#        print "Hanging in mashout hold mode - waiting for you to update mashfile step"
+ #       MSG = "Time to Start Mashout - Update mashfile"
+ #       Email_Status(MSG)
+#	print MASH_OUT
+#	mashfile = open('mashfile.txt', 'r')
+#	MASH_OUT = mashfile.read().strip('\n')
+#	mashfile.close()
+#	print MASH_OUT
+#   print "Starting MASHOUT RAMP-UP Step"	
+#    #Starting Mashout
+#    Ramp_Up(MASH_OUT_TEMP)
+#    print "Starting MASHOUT PID LOOP"
+#    PID_Control_Loop(MASH_OUT_TEMP, 0)
+#    while (GRAIN_OUT=='HOLD'):
+#        PID_Control_Loop(MASH_OUT_TEMP, 1)
+#        print "Hanging in mashout hold mode - waiting for you to update grainoutfile step"
+#        MSG = "MASHOUT Temp Hit: Pull Grain and Update grainoutfile" 
+#        Email_Status(MSG)
+#	print GRAIN_OUT
+#	grainoutfile = open('grainoutfile.txt', 'r')
+#	GRAIN_OUT = grainoutfile.read().strip('\n')
+#	grainoutfile.close()
+#	print GRAIN_OUT
+ #   print "Ramping Boil"
+ #   Ramp_Up(BOIL_TEMP + 3000)
+#    print "Done ramping Boil starting PID_BOIL LOOP"
+#    MSG = "Done ramping Boil - Get ready to boil!"
+#    Email_Status(MSG)
+#    while (FLAME_OUT=='HOLD'):
+#        Boil_Control(BOIL_TEMP, 1)
+#        print "Hanging in BOIL mode - waiting for you to update BOILfile step if you think its actually done and ready for flameout"
+#        MSG = "Boil is Complete- Update flameoutfile"
+#        Email_Status(MSG)
+#	print FLAME_OUT
+#	flameoutfile = open('flameoutfile.txt', 'r')
+#	FLAME_OUT = flameoutfile.read().strip('\n')
+#	flameoutfile.close()
+#	print FLAME_OUT
+ #   turn_heat_off()
+ #   print "the HEAT IS OFF!!!"
