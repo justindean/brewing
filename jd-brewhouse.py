@@ -15,9 +15,9 @@ os.system('modprobe w1-gpio')
 os.system('modprobe w1-therm')
 
 FEED_ID = "192066180"
-API_KEY = "2pUA8p0bGmvdREAiK7hXIBp9SYpm8ZCDaS2wG0lBmc2uoaKl"
+API_KEY = "blah"
 api = xively.XivelyAPIClient(API_KEY)
-r=redis.StrictRedis(host='pub-redis-12700.eu-west-1-1.2.ec2.garantiadata.com', port=12700, db=0, password='brewhouse')
+r=redis.StrictRedis(host='pub-redis-12700.eu-west-1-1.2.ec2.garantiadata.com', port=12700, db=0, password='blah')
 
 parser = OptionParser()
 parser.add_option("-r", "--recipe", type=str, default = 'recipe.json.rtb')
