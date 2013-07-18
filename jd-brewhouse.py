@@ -30,6 +30,8 @@ parser.add_option("--mash_temp", type=int, default = 67)
 parser.add_option("--mash_time", type=int, default = 60)
 parser.add_option("--boil_time", type=int, default = 60)
 parser.add_option("--strike_temp", type=int, default = 70)
+parser.add_option("--boil_temp", type=int, default = (((212 - 32)*5) / 9) * 1000)
+parser.add_option("--mashout_temp", type=int, default = (((168 - 32)*5) / 9) * 1000)
 (options, args) = parser.parse_args()
 P = options.prop
 I = options.integral
@@ -63,7 +65,8 @@ if (options.manual=='YES'):
     MASH_TEMP = options.mash_temp * 1000
     MASH_TIME = options.mash_time
     BOIL_TIME = options.boil_time
-
+    BOIL_TEMP = options.boil_temp
+    MASH_OUT_TEMP = options.mashout_temp
 
 #function to initialize GPIO pin(s) for outbound 3.3v use
 def Setup_GPIO():
@@ -356,8 +359,6 @@ class BrewSession(object):
         if (options.resume=='NO'):
             Setup_Redis_States(self.r)
         Setup_GPIO()
-        #self.BOIL_TEMP = 20000
-        #self.MASH_OUT_TEMP = 20000
         while True:
             self.current_state = Get_State(self.r)
             self.state_handler[self.current_state]()
